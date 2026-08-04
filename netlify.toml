@@ -1,0 +1,14 @@
+# netlify.toml – Netlify configuration for the VORTEX site
+# This file tells Netlify where to find serverless functions.
+
+[build]
+  # Build command – no static build needed (the site is pure HTML/CSS)
+  # but we can run any build steps here if needed.
+  publish = "all-business/site"
+  command = "# no build step – static site"
+
+[functions]
+  # Directory relative to the repository root where Netlify will look for functions.
+  directory = "netlify/functions"
+  # Optional timeout (seconds) – default 10s, we give a bit more for email send.
+  timeout = 30

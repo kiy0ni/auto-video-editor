@@ -1,0 +1,7 @@
+# requirements.txt for Netlify Functions – install FastAPI, Uvicorn,
+# Mangum (ASGI‑to‑Lambda adapter) and Himalaya (CLI).
+fastapi==0.111.0
+uvicorn==0.30.0
+mangum==0.17.0
+himalaya==0.11.0
+# (SQLite3 is built‑in in Python, no extra dependency)
