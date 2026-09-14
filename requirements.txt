@@ -1,1 +1,9 @@
-openai-whisper
+numpy>=1.22
+# Desktop app
+customtkinter>=5.2
+pillow>=9.0
+tkinterdnd2>=0.4       # drag & drop (optional)
+# Speech-to-text: sentence-aware cuts, keyword detection and captions (strongly recommended).
+faster-whisper>=1.0
+# Face tracking for the "smart" vertical crop (optional).
+opencv-python-headless>=4.8,<5

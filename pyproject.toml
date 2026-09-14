@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-video-editor"
+version = "2.0.0"
+description = "Turn long recordings into highlight reels and captioned vertical shorts, automatically."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.22", "customtkinter>=5.2", "pillow>=9.0"]
+
+[project.optional-dependencies]
+speech = ["faster-whisper>=1.0"]
+vision = ["opencv-python-headless>=4.8,<5"]
+dnd = ["tkinterdnd2>=0.4"]
+all = ["faster-whisper>=1.0", "opencv-python-headless>=4.8,<5", "tkinterdnd2>=0.4"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+auto-video-editor = "auto_video_editor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["auto_video_editor*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
