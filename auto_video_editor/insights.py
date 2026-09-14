@@ -395,24 +395,33 @@ def fast_cpu() -> bool:
 
 
 def auto_model(duration: float) -> Tuple[str, str]:
-    """Speech model that gives the best accuracy in a reasonable time on this computer."""
-    if has_cuda():
-        return "large-v3", "NVIDIA GPU"
+    """Speech model that gives the best accuracy while keeping the transcription under about an hour.
+
+    Measured on dense speech (a 3 h stream): on an Apple Silicon CPU ``small`` runs at ~0.7x real time,
+    ``base`` at ~0.25x. The most accurate model is only worth it when it stays affordable.
+    """
     hours = duration / 3600
+    if has_cuda():
+        return ("large-v3", "NVIDIA GPU") if hours <= 2.5 else ("turbo", "NVIDIA GPU, long recording")
     if fast_cpu():
-        return ("small", "fast processor") if hours <= 4 else ("base", "very long recording")
+        if hours <= 1.0:
+            return "small", "fast processor"
+        return ("base", "long recording: small would take hours") if hours <= 4 else ("tiny", "very long recording")
+    if hours <= 0.5:
+        return "small", "short recording"
     return ("base", "standard processor") if hours <= 2 else ("tiny", "long recording on a standard processor")
 
 
-_REALTIME = {"tiny": 0.03, "base": 0.05, "small": 0.12, "medium": 0.35, "large-v3": 0.7, "turbo": 0.3}
+# Seconds of transcription per second of dense speech, on an Apple Silicon / 8-core CPU.
+_REALTIME = {"tiny": 0.10, "base": 0.25, "small": 0.70, "medium": 2.0, "large-v3": 4.0, "turbo": 1.5}
 
 
 def estimate_transcription(duration: float, model: str) -> float:
-    factor = _REALTIME.get(model, 0.12)
+    factor = _REALTIME.get(model, 0.7)
     if has_cuda():
-        factor *= 0.12
+        factor *= 0.06
     elif not fast_cpu():
-        factor *= 1.8
+        factor *= 2.0
     return duration * factor
 
 

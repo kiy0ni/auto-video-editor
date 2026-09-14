@@ -128,7 +128,8 @@ class Settings:
     language: str = ""  # empty = auto-detect
     beam_size: int = 5
     vocabulary: List[str] = field(default_factory=list)  # names/jargon the transcriber should know
-    auto_vocabulary: bool = True    # add the vocabulary of the detected game
+    vocabulary_packs: List[str] = field(default_factory=list)  # ids of the packs you chose (glossary.py)
+    auto_vocabulary: bool = True    # also use the packs recognised from the title and the speech
     profanity_prompt: bool = True   # tell the model swear words exist so it writes them down
     censor_profanity: bool = False  # mask them in captions and texts: p*tain
     censor_words: List[str] = field(default_factory=list)  # extra words to mask

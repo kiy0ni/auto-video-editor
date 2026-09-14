@@ -44,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--set", action="append", metavar="KEY=VALUE", default=[],
                    help="change any setting, e.g. --set caption_color=#00FF88 (repeatable)")
     p.add_argument("--list-settings", action="store_true", help="list every setting with its default value")
+    p.add_argument("--list-packs", action="store_true", help="list the vocabulary packs (games and topics)")
     p.add_argument("--version", action="version", version=f"{__app_name__} {__version__}")
 
     g = p.add_argument_group("highlight reel")
@@ -83,6 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--language", help="spoken language code, e.g. en, fr (default: auto-detect)")
     g.add_argument("--keywords", help="comma separated hype phrases (replaces the default list)")
     g.add_argument("--vocabulary", help="comma separated names/jargon the transcriber should know (e.g. Minecraft,mob)")
+    g.add_argument("--packs", metavar="ID[,ID]",
+                   help="vocabulary packs to use, e.g. minecraft,twitch-fr (see --list-packs)")
     g.add_argument("--censor", action=argparse.BooleanOptionalAction, default=None,
                    help="mask swear words in captions and texts (p*tain)")
     g.add_argument("--speakers", type=int, metavar="N", help="number of speakers (0 = auto, 1 = single voice)")
@@ -141,6 +144,14 @@ def settings_from_args(args: argparse.Namespace, base: Optional[Settings] = None
         s.keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
     if getattr(args, "vocabulary", None) is not None:
         s.vocabulary = [k.strip() for k in args.vocabulary.split(",") if k.strip()]
+    if getattr(args, "packs", None) is not None:
+        from .glossary import get_pack
+
+        keys = [k.strip() for k in args.packs.split(",") if k.strip()]
+        unknown = [k for k in keys if get_pack(k) is None]
+        if unknown:
+            raise ValueError(f"unknown vocabulary pack(s): {', '.join(unknown)} (see --list-packs)")
+        s.vocabulary_packs = [get_pack(k).id for k in keys]
     if getattr(args, "speakers", None) is not None:
         s.diarize = args.speakers != 1
     if args.no_cache:
@@ -207,6 +218,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.gui:
         return _launch_gui(args.input[0] if args.input else None)
+    if args.list_packs:
+        from .glossary import all_categories, load_packs, pack_errors, user_packs_dir
+
+        packs = load_packs()
+        for category in all_categories():
+            group = sorted((p for p in packs.values() if p.category == category), key=lambda p: p.name.lower())
+            if not group:
+                continue
+            print(f"\n{category} ({len(group)})")
+            for pack in group:
+                print(f"  {pack.id:<24} {pack.name}  ·  {len(pack.terms)} terms{'  (yours)' if pack.custom else ''}")
+        print(f"\n{len(packs)} packs. Add your own .json packs in: {user_packs_dir()}")
+        for error in pack_errors():
+            print(f"  skipped: {error}", file=sys.stderr)
+        return 0
     if args.list_settings:
         for key, value in Settings().to_dict().items():
             shown = ",".join(value) if isinstance(value, list) else value

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "auto-video-editor"
-version = "2.0.0"
+version = "2.1.0"
 description = "Turn long recordings into highlight reels and captioned vertical shorts, automatically."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -23,6 +23,9 @@ auto-video-editor = "auto_video_editor.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["auto_video_editor*"]
+
+[tool.setuptools.package-data]
+auto_video_editor = ["data/vocabulary/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

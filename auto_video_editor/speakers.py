@@ -158,12 +158,12 @@ def assign_speakers(segments: Sequence, count: int = 0, max_speakers: int = 6, m
     points[:, -2] *= 2.0  # the pitch of a voice separates speakers better than any timbre coefficient
 
     options = [count] if count > 1 else list(range(2, min(max_speakers, len(usable) // 8) + 1))
-    best_k, best_labels, best_score = 1, np.zeros(len(usable), dtype=int), -1.0
+    best_labels, best_score = np.zeros(len(usable), dtype=int), -1.0
     for k in options:
         labels, _inertia = min((_kmeans(points, k, seed) for seed in range(8)), key=lambda r: r[1])
         score = _silhouette(points, labels)
         if score > best_score:
-            best_k, best_labels, best_score = k, labels, score
+            best_labels, best_score = labels, score
     if count == 0 and best_score < min_silhouette:
         return 1
 

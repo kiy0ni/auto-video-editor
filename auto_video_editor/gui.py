@@ -33,11 +33,12 @@ except Exception:  # pragma: no cover - depends on the platform build
 
 from . import __app_name__, __version__, icons, vision
 from .ffmpeg import _CREATION_FLAGS, MediaInfo, ffmpeg_bin, missing_tools, probe
+from .glossary import (Pack, all_categories, auto_packs, get_pack, load_packs, pack_errors, resolve_packs,
+                       write_pack_template)
 from .insights import (VideoInsights, auto_layout, auto_model, describe_position, estimate_render,
                        estimate_transcription, has_cuda, load_insights, save_insights, scan_video)
 from .reporting import Cancelled, Reporter
-from .settings import (CONTENT_PRESETS, DEFAULT_KEYWORDS, PROFILES, Settings, config_dir,
-                       settings_path)
+from .settings import DEFAULT_KEYWORDS, PROFILES, Settings, config_dir, settings_path
 from .timeline import format_clock, parse_duration
 from .transcribe import available_backends
 
@@ -201,9 +202,15 @@ class WheelScroll:
         self.canvases: List[tk.Canvas] = []
         patch = str(root.tk.call("info", "patchlevel"))
         self.tk9 = int(patch.split(".")[0]) >= 9
-        for sequence in ("<MouseWheel>", "<Shift-MouseWheel>", "<Button-4>", "<Button-5>"):
+        self.rebind()
+
+    def rebind(self) -> None:
+        """Install the handlers. Call again after creating a CTkScrollableFrame: CustomTkinter adds its
+        own global wheel handler every time one is created."""
+        root = self.root
+        for sequence in ("<MouseWheel>", "<Shift-MouseWheel>", "<Button-4>", "<Button-5>", "<TouchpadScroll>"):
             try:
-                root.unbind_all(sequence)  # remove CustomTkinter's handlers
+                root.unbind_all(sequence)
             except tk.TclError:
                 pass
         root.bind_all("<MouseWheel>", self._on_wheel, add="+")
@@ -218,6 +225,11 @@ class WheelScroll:
         canvas = frame._parent_canvas
         canvas.configure(yscrollincrement=1)  # scroll by pixels
         self.canvases.append(canvas)
+
+    def unregister(self, frame: ctk.CTkScrollableFrame) -> None:
+        canvas = getattr(frame, "_parent_canvas", None)
+        if canvas in self.canvases:
+            self.canvases.remove(canvas)
 
     def _on_wheel(self, event) -> None:
         if self.tk9 or sys.platform != "darwin":
@@ -246,14 +258,20 @@ class WheelScroll:
         except (AttributeError, tk.TclError):
             return
         path = str(widget)
-        for canvas in self.canvases:
+        for canvas in list(self.canvases):
             base = str(canvas)
-            if (path == base or path.startswith(base + ".")) and canvas.winfo_ismapped():
+            if not (path == base or path.startswith(base + ".")):
+                continue
+            try:
+                if not canvas.winfo_ismapped():
+                    continue
                 if canvas.yview() == (0.0, 1.0) or not pixels:
                     return
                 step = int(round(pixels)) or (1 if pixels > 0 else -1)
                 canvas.yview_scroll(step, "units")
-                return
+            except tk.TclError:  # window closed
+                self.canvases.remove(canvas)
+            return
 
 
 # ====================================================================================================
@@ -326,6 +344,7 @@ class App:
 
         self._build()
         self.vars["facecam"].trace_add("write", lambda *_: self._update_detected())
+        self.vars["vocabulary_packs"].trace_add("write", lambda *_: self._update_detected())
         self.scroll = WheelScroll(root)
         for page in self.pages.values():
             self.scroll.register(page)
@@ -787,9 +806,12 @@ class App:
                      "captions")
         self._option(self._row(options, "Spoken language", "Setting it avoids wrong detections."),
                      "language", LANGUAGES, width=200)
-        controls = self._row(options, "Vocabulary hints", "Names, jargon, foreign words. Game terms are added "
-                                                           "automatically.")
-        self._entry(controls, self._var("vocabulary", tk.StringVar), width=300).pack(side="right")
+        controls = self._row(options, "Vocabulary", "Packs of games and topics, plus your own words "
+                                                    "(names, jargon), comma separated.")
+        self._entry(controls, self._var("vocabulary", tk.StringVar), width=240).pack(side="right")
+        self._button(controls, "Packs…", self._open_vocab_picker, "sliders", "subtle", width=100).pack(
+            side="right", padx=(0, 8))
+        self._var("vocabulary_packs", tk.StringVar)
         self.vocab_hint = ctk.CTkLabel(controls.texts, text="", font=self.f.small, text_color=ACCENT, anchor="w",
                                        height=18)
         self.vocab_hint.pack(anchor="w")
@@ -1049,8 +1071,17 @@ class App:
         self._entry(self._row(context, "Vocabulary hints", "Game names, jargon, anglicisms, nicknames. "
                                                             "Comma separated."),
                     self._var("vocabulary", tk.StringVar), width=320).pack(side="right")
-        self._switch(self._row(context, "Add game vocabulary automatically",
-                               "When a game is recognised from the title or from what is said."), "auto_vocabulary")
+        controls = self._row(context, "Vocabulary packs", "Names and jargon of games and topics.")
+        self._button(controls, "My packs folder", self._open_packs_folder, "folder", "ghost", width=150).pack(
+            side="right")
+        self._button(controls, "Choose packs…", self._open_vocab_picker, "sliders", "accent", width=150).pack(
+            side="right", padx=(0, 8))
+        self.packs_detail = ctk.CTkLabel(controls.texts, text="", font=self.f.small, text_color=ACCENT, anchor="w",
+                                         height=18)
+        self.packs_detail.pack(anchor="w")
+        self._switch(self._row(context, "Recognise packs automatically",
+                               "From the title, the metadata and a speech sample: one game and one topic."),
+                     "auto_vocabulary", command=self._update_detected)
         self._switch(self._row(context, "Transcribe swear words",
                                "Off, the model tends to skip them silently."), "profanity_prompt")
         self._switch(self._row(context, "Censor swear words", "Masked everywhere they appear: p*tain, sh*t."),
@@ -1320,6 +1351,45 @@ class App:
                     child.configure(text_color=FAINT if auto_count else TEXT)
         self._update_detected()
 
+    def _selected_pack_ids(self) -> List[str]:
+        raw = self.vars["vocabulary_packs"].get() if "vocabulary_packs" in self.vars else ""
+        return [key.strip() for key in str(raw).split(",") if key.strip()]
+
+    def _refresh_vocab_hints(self) -> None:
+        if not hasattr(self, "vocab_hint"):
+            return
+        names = [pack.name for pack in resolve_packs(self._selected_pack_ids())]
+        auto = bool(self.vars["auto_vocabulary"].get()) if "auto_vocabulary" in self.vars else False
+        if auto and self.media is not None:
+            for pack in auto_packs([self.media.title, Path(self.media.path).stem]):
+                if pack.name not in names:
+                    names.append(f"{pack.name} (auto)")
+        if names:
+            text = "Packs: " + ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
+        elif auto:
+            text = "Packs: recognised automatically from the title and the speech"
+        else:
+            text = "No vocabulary pack"
+        self.vocab_hint.configure(text=text)
+        if hasattr(self, "packs_detail"):
+            self.packs_detail.configure(text=f"{text}  ·  {len(load_packs())} available")
+
+    def _open_vocab_picker(self) -> None:
+        picker = getattr(self, "vocab_picker", None)
+        if picker is not None and picker.win.winfo_exists():
+            picker.win.lift()
+            return
+        self.vocab_picker = VocabularyPicker(self, self._selected_pack_ids(), self._set_packs)
+
+    def _set_packs(self, ids: List[str]) -> None:
+        self.vars["vocabulary_packs"].set(", ".join(ids))
+        self.toast(f"{len(ids)} vocabulary pack{'s' if len(ids) != 1 else ''} selected", "success")
+
+    def _open_packs_folder(self) -> None:
+        folder = write_pack_template()
+        open_path(folder)
+        self.toast("Add your own packs as .json files, then reopen the pack list", "info")
+
     def _update_detected(self) -> None:
         """Refresh everything that explains the automatic choices for the current video."""
         if not hasattr(self, "found_card") or "shorts_layout" not in self.vars:
@@ -1336,11 +1406,7 @@ class App:
         else:
             self.layout_hint.configure(text="")
         game = ins.title_game if ins else None
-        if "auto_vocabulary" in self.vars and self.vars["auto_vocabulary"].get():
-            self.vocab_hint.configure(text=f"+ {game} terms added automatically" if game else
-                                      "+ game terms when a game is recognised")
-        else:
-            self.vocab_hint.configure(text="")
+        self._refresh_vocab_hints()
         if media is None:
             self.found_card.pack_forget()
             return
@@ -1387,10 +1453,10 @@ class App:
         shorts = 5 * 40
         hardware = sys.platform == "darwin" or has_cuda()
         total = speech + estimate_render(reel, shorts, hardware)
-        text = f"  About {format_clock(total)} on this computer"
+        text = f"  About {format_clock(total, True)} on this computer"
         if speech:
-            text += f" (speech model {model}: ~{format_clock(speech)}, rendering: ~{format_clock(total - speech)})"
-        text += ". Re-runs with other settings take seconds."
+            text += f" (speech model {model}: ~{format_clock(speech, True)}, rendering: ~{format_clock(total - speech)})"
+        text += ". Rough estimate; re-runs with other settings take seconds."
         self.found_eta.configure(text=text)
 
     def _update_estimates(self) -> None:
@@ -2110,6 +2176,189 @@ class App:
 # ====================================================================================================
 # Facecam picker window
 # ====================================================================================================
+
+class VocabularyPicker:
+    """Choose vocabulary packs: search, filter by category and preview the terms of each pack."""
+
+    def __init__(self, app: App, selected: Sequence[str], on_done: Callable[[List[str]], None]) -> None:
+        self.app, self.on_done = app, on_done
+        order = {name: index for index, name in enumerate(all_categories())}
+        self.packs: List[Pack] = sorted(load_packs(refresh=True).values(),
+                                        key=lambda p: (order.get(p.category, 99), p.name.lower()))
+        known = {pack.id for pack in self.packs}
+        self.selected: List[str] = []
+        for key in selected:
+            pack = get_pack(key)
+            if pack is not None and pack.id in known and pack.id not in self.selected:
+                self.selected.append(pack.id)
+        self.rows: List[SimpleNamespace] = []
+        self.current: Optional[Pack] = None
+
+        win = ctk.CTkToplevel(app.root)
+        self.win = win
+        win.title("Vocabulary packs")
+        win.configure(fg_color=CARD)
+        win.geometry("1060x720")
+        win.minsize(920, 600)
+        win.transient(app.root)
+        win.grid_columnconfigure(0, weight=3)
+        win.grid_columnconfigure(1, weight=2)
+        win.grid_rowconfigure(2, weight=1)
+
+        head = ctk.CTkFrame(win, fg_color="transparent")
+        head.grid(row=0, column=0, columnspan=2, sticky="ew", padx=24, pady=(20, 4))
+        ctk.CTkLabel(head, text="Vocabulary packs", font=app.f.title, text_color=TEXT, anchor="w").pack(anchor="w")
+        ctk.CTkLabel(head, text=f"{len(self.packs)} games and topics. Their names and jargon help the transcriber "
+                                "write them correctly, and become hashtags.",
+                     font=app.f.small, text_color=MUTED, anchor="w").pack(anchor="w")
+
+        filters = ctk.CTkFrame(win, fg_color="transparent")
+        filters.grid(row=1, column=0, columnspan=2, sticky="ew", padx=24, pady=(8, 10))
+        self.query = tk.StringVar()
+        self.search = app._entry(filters, self.query, width=320)
+        self.search.pack(side="left")
+        ctk.CTkLabel(filters, text="", image=themed_icon("sliders", 16, MUTED)).pack(side="left", padx=(14, 6))
+        self.category = tk.StringVar(value="All categories")
+        ctk.CTkOptionMenu(filters, values=["All categories", *all_categories(), "Selected"], variable=self.category,
+                          command=lambda _value: self._filter(), width=220, height=36, corner_radius=10,
+                          fg_color=SUBTLE, button_color=SUBTLE, button_hover_color=BORDER, text_color=TEXT,
+                          font=app.f.small_bold, dropdown_fg_color=CARD, dropdown_hover_color=SUBTLE,
+                          dropdown_text_color=TEXT, dynamic_resizing=False).pack(side="left")
+        self.count = ctk.CTkLabel(filters, text="", font=app.f.small_bold, text_color=ACCENT)
+        self.count.pack(side="right")
+        self.query.trace_add("write", lambda *_: self._filter())
+
+        self.list = ctk.CTkScrollableFrame(win, fg_color=SUBTLE, corner_radius=14, scrollbar_button_color=BORDER,
+                                           scrollbar_button_hover_color=FAINT)
+        self.list.grid(row=2, column=0, sticky="nsew", padx=(24, 8))
+        app.scroll.rebind()
+        app.scroll.register(self.list)
+
+        preview = ctk.CTkFrame(win, fg_color=SUBTLE, corner_radius=14)
+        preview.grid(row=2, column=1, sticky="nsew", padx=(8, 24))
+        self.preview_name = ctk.CTkLabel(preview, text="", font=app.f.h2, text_color=TEXT, anchor="w", justify="left",
+                                         wraplength=340)
+        self.preview_name.pack(anchor="w", padx=18, pady=(16, 0))
+        self.preview_meta = ctk.CTkLabel(preview, text="", font=app.f.small, text_color=MUTED, anchor="w")
+        self.preview_meta.pack(anchor="w", padx=18)
+        self.preview_aliases = ctk.CTkLabel(preview, text="", font=app.f.small, text_color=TEXT, anchor="w",
+                                            justify="left", wraplength=340)
+        self.preview_aliases.pack(anchor="w", padx=18, pady=(8, 6))
+        self.preview_toggle = app._button(preview, "Add to selection", self._toggle_current, "check", "accent",
+                                          width=190, height=34)
+        self.preview_toggle.pack(anchor="w", padx=18, pady=(2, 8))
+        self.preview_terms = ctk.CTkTextbox(preview, font=app.f.small, fg_color=CARD, text_color=TEXT, wrap="word",
+                                            border_width=0, corner_radius=10)
+        self.preview_terms.pack(fill="both", expand=True, padx=18, pady=(4, 18))
+
+        footer = ctk.CTkFrame(win, fg_color="transparent")
+        footer.grid(row=3, column=0, columnspan=2, sticky="ew", padx=24, pady=16)
+        app._button(footer, "My packs folder", app._open_packs_folder, "folder", "ghost", width=160).pack(side="left")
+        app._button(footer, "Clear selection", self._clear, None, "ghost", width=140).pack(side="left", padx=6)
+        errors = pack_errors()
+        if errors:
+            ctk.CTkLabel(footer, text=f"{len(errors)} pack file(s) skipped: {errors[0][:70]}", font=app.f.tiny,
+                         text_color=AMBER).pack(side="left", padx=8)
+        app._button(footer, "Apply", self._apply, "check", "accent", width=130).pack(side="right")
+        app._button(footer, "Cancel", win.destroy, None, "ghost", width=100).pack(side="right", padx=8)
+
+        win.bind("<Destroy>", self._on_destroy, add="+")
+        first = get_pack(self.selected[0]) if self.selected else (self.packs[0] if self.packs else None)
+        if first is not None:
+            self._show(first)
+        self._build_rows(0)
+        win.after(150, self._focus)
+
+    def _focus(self) -> None:
+        try:
+            self.win.lift()
+            self.search.focus_set()
+        except tk.TclError:
+            pass
+
+    def _build_rows(self, start: int) -> None:
+        if not self.win.winfo_exists():
+            return
+        for pack in self.packs[start:start + 25]:
+            row = ctk.CTkFrame(self.list, fg_color=CARD, corner_radius=10)
+            var = tk.BooleanVar(value=pack.id in self.selected)
+            ctk.CTkCheckBox(row, text=pack.name, variable=var, onvalue=True, offvalue=False,
+                            command=lambda p=pack, v=var: self._set(p, bool(v.get())), font=self.app.f.body_bold,
+                            text_color=TEXT, fg_color=ACCENT, hover_color=ACCENT_HOVER, border_color=FAINT,
+                            checkbox_width=20, checkbox_height=20, corner_radius=6).pack(side="left", padx=12, pady=9)
+            detail = f"{pack.genre or pack.category}  ·  {len(pack.terms)} terms" + ("  ·  yours" if pack.custom else "")
+            ctk.CTkLabel(row, text=detail, font=self.app.f.tiny, text_color=MUTED).pack(side="right", padx=12)
+            App._bind_click(row, lambda p=pack: self._show(p))
+            self.rows.append(SimpleNamespace(pack=pack, row=row, var=var))
+        self._filter()
+        if start + 25 < len(self.packs):
+            self.win.after(1, lambda: self._build_rows(start + 25))
+
+    def _filter(self) -> None:
+        query, category = self.query.get(), self.category.get()
+        shown = 0
+        for item in self.rows:
+            item.row.pack_forget()
+        for item in self.rows:
+            pack = item.pack
+            if category == "Selected" and pack.id not in self.selected:
+                continue
+            if category not in ("All categories", "Selected") and pack.category != category:
+                continue
+            if not pack.matches(query):
+                continue
+            item.row.pack(fill="x", padx=8, pady=3)
+            shown += 1
+        self.count.configure(text=f"{shown} shown  ·  {len(self.selected)} selected")
+
+    def _set(self, pack: Pack, on: bool) -> None:
+        if on and pack.id not in self.selected:
+            self.selected.append(pack.id)
+        elif not on and pack.id in self.selected:
+            self.selected.remove(pack.id)
+        for item in self.rows:
+            if item.pack.id == pack.id:
+                item.var.set(on)
+        self._show(pack)
+        if self.category.get() == "Selected":
+            self._filter()
+        else:
+            shown = sum(1 for item in self.rows if item.row.winfo_manager())
+            self.count.configure(text=f"{shown} shown  ·  {len(self.selected)} selected")
+
+    def _show(self, pack: Pack) -> None:
+        self.current = pack
+        self.preview_name.configure(text=pack.name)
+        self.preview_meta.configure(text="  ·  ".join(filter(None, [pack.category, pack.genre,
+                                                                    f"{len(pack.terms)} terms"])))
+        self.preview_aliases.configure(text="Recognised in titles: " + ", ".join(pack.aliases[:8])
+                                       if pack.aliases else "Only used when you select it")
+        self.preview_toggle.configure(text="Remove from selection" if pack.id in self.selected else "Add to selection")
+        self.preview_terms.configure(state="normal")
+        self.preview_terms.delete("1.0", "end")
+        self.preview_terms.insert("1.0", "  ·  ".join(pack.terms) + "\n\nHashtags: " + " ".join(f"#{t}" for t in pack.tags))
+        self.preview_terms.configure(state="disabled")
+
+    def _toggle_current(self) -> None:
+        if self.current is not None:
+            self._set(self.current, self.current.id not in self.selected)
+
+    def _clear(self) -> None:
+        self.selected.clear()
+        for item in self.rows:
+            item.var.set(False)
+        if self.current is not None:
+            self._show(self.current)
+        self._filter()
+
+    def _apply(self) -> None:
+        self.on_done(list(self.selected))
+        self.win.destroy()
+
+    def _on_destroy(self, event) -> None:
+        if event.widget is self.win:
+            self.app.scroll.unregister(self.list)
+
 
 class FacecamPicker:
     def __init__(self, app: App, frame: Image.Image, initial, on_done: Callable) -> None:

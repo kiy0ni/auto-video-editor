@@ -17,7 +17,7 @@ from .captions import build_ass, build_srt, remap_words, remap_words_sequence
 from .censor import censor_text, profanity_set
 from .exporters import write_chapters, write_edl, write_fcp_xml, write_moments_csv
 from .ffmpeg import MediaInfo, pick_encoder, probe, require_tools
-from .glossary import detect_game, game_vocabulary, hashtags, hype_phrases
+from .glossary import Pack, auto_packs, hashtags, hype_phrases, prompt_terms, resolve_packs
 from .insights import (VideoInsights, auto_layout, auto_model, auto_shorts_count, auto_target, auto_trim,
                        classify_content, describe_position, estimate_transcription, load_insights, save_insights,
                        scan_video, speech_stats)
@@ -40,7 +40,7 @@ ANALYSIS_KEYS = (
     "shorts_count", "shorts_auto", "shorts_min", "shorts_max", "transcriber", "whisper_model", "language",
     "keywords", "auto_keywords", "jump_cuts", "min_silence", "silence_threshold", "context_before", "context_after",
     "diversity", "min_score", "beam_size", "weight_loudness", "weight_spikes", "weight_speech", "weight_keywords",
-    "weight_exclamations", "skip_start", "skip_end", "auto_trim", "vocabulary", "auto_vocabulary",
+    "weight_exclamations", "skip_start", "skip_end", "auto_trim", "vocabulary", "vocabulary_packs", "auto_vocabulary",
     "profanity_prompt", "censor_profanity", "censor_words", "diarize", "speaker_count",
 )
 
@@ -61,6 +61,7 @@ class Project:
     auto: List[List[str]] = field(default_factory=list)   # [label, value] for every automatic decision
     game: str = ""
     speakers: int = 0
+    packs: List[str] = field(default_factory=list)          # vocabulary packs used (ids)
 
     @property
     def path(self) -> Path:
@@ -90,6 +91,7 @@ class Project:
             "language": self.language,
             "transcribed": self.transcribed,
             "game": self.game,
+            "packs": self.packs,
             "speakers": self.speakers,
             "auto": self.auto,
             "media": self.media.to_dict(),
@@ -122,6 +124,7 @@ class Project:
             resolved=dict(data.get("resolved", {})),
             auto=[list(item) for item in data.get("auto", [])],
             game=data.get("game", ""),
+            packs=[str(p) for p in data.get("packs", [])],
             speakers=int(data.get("speakers", 0)),
         )
 
@@ -194,9 +197,13 @@ class Pipeline:
 
         # -- speech --------------------------------------------------------------------------------
         transcript: Optional[Transcript] = None
-        game = insights.title_game
-        if game:
-            self.log(f"Game from the title: {game}.")
+        chosen = resolve_packs(s.vocabulary_packs)
+        title_texts = [info.title, Path(info.path).stem, Path(info.path).parent.name]
+        detected: List[Pack] = []
+        if s.auto_vocabulary:
+            detected = [p for p in auto_packs(title_texts) if p not in chosen]
+            for pack in detected:
+                self.log(f"Recognised from the title: {pack.name} ({pack.category}).")
         speakers = 0
         if backend and info.has_audio:
             if s.whisper_model == "auto":
@@ -206,22 +213,26 @@ class Pipeline:
                 auto.append(["Speech model", s.whisper_model])
             transcriber = Transcriber(backend, s.whisper_model, s.language, self.log, r.cancel_event,
                                       beam_size=s.beam_size, profanity=s.profanity_prompt)
-            if not s.language or (s.auto_vocabulary and not game):
+            sample = ""
+            if not s.language or (s.auto_vocabulary and not any(p.is_game for p in chosen + detected)):
                 language, sample = self._preview(info, transcriber, insights)
                 if not s.language and language:
                     s.language = language
                     auto.append(["Language", language])
-                if s.auto_vocabulary and not game:
-                    game = detect_game([sample], min_score=3)[0]
-                    if game:
-                        self.log(f"Game recognised from what is said: {game}.")
-            if s.auto_vocabulary and game:
-                known = {v.lower() for v in s.vocabulary}
-                extra = [t for t in game_vocabulary(game) if t.lower() not in known]
-                s.vocabulary = list(s.vocabulary) + extra[:max(0, 30 - len(s.vocabulary))]
-                self.log(f"Vocabulary: {len(extra)} {game} terms added automatically.")
-            if game:
-                auto.append(["Game", game])
+                if s.auto_vocabulary:
+                    for pack in auto_packs(title_texts, sample):
+                        if pack not in chosen and pack not in detected:
+                            detected.append(pack)
+                            self.log(f"Recognised from what is said: {pack.name} ({pack.category}).")
+            packs = chosen + detected
+            if packs:
+                pool = [term for pack in packs for term in pack.vocabulary()]
+                s.vocabulary = prompt_terms(user.vocabulary, pool, sample or insights.sample_text)
+                self.log(f"Vocabulary packs: {', '.join(p.name for p in packs)} "
+                         f"({len(s.vocabulary) - len(user.vocabulary)} most relevant of {len(pool)} terms given "
+                         f"to the transcriber).")
+            if detected:
+                auto.append(["Vocabulary", " + ".join(p.name for p in detected)])
             transcript = self._load_transcript(info, backend, s, transcriber)
             transcript = self._drop_silent_segments(transcript, env)
             if s.diarize:
@@ -235,6 +246,8 @@ class Pipeline:
             else:
                 speakers = 1
         r.check_cancel()
+        packs_used = chosen + detected
+        game = next((p.name for p in packs_used if p.is_game), None) or insights.title_game
 
         # -- content, trimming, phrases -------------------------------------------------------------------
         r.stage("moments", "Finding the best moments")
@@ -331,7 +344,7 @@ class Pipeline:
             settings=Settings.from_dict(user.to_dict()), target_duration=target,
             highlight=highlight, shorts=shorts, language=language, transcribed=transcript is not None,
             created=datetime.now().isoformat(timespec="seconds"), resolved=s.to_dict(), auto=auto,
-            game=game or "", speakers=speakers,
+            game=game or "", speakers=speakers, packs=[p.id for p in packs_used],
         )
         path = project.save()
         total = sum(m.edited_duration(s.jump_cuts) for m in highlight)
@@ -655,7 +668,8 @@ class Pipeline:
             except Exception as exc:  # noqa: BLE001 - the kit is a bonus, never fatal
                 self.log(f"Thumbnail skipped ({exc}).")
             reel_title = self._moment_title(best, f"{Path(info.path).stem}: best moments")
-            tags = [t for t in hashtags(project.game, project.content_type, project.language) if t != "#shorts"]
+            tags = [t for t in hashtags(project.packs or project.game, project.content_type, project.language)
+                    if t != "#shorts"]
             kit = out / f"{stem}_publish.txt"
             kit.write_text(publish.reel_kit_text(reel_title, chapters, tags), encoding="utf-8")
             result.extras.append(kit)
@@ -683,7 +697,7 @@ class Pipeline:
         if layout == "smart" and not vision.available():
             self.log("NOTE: smart crop needs OpenCV 4 (pip install \"opencv-python-headless<5\"). "
                      "Using a centered crop.")
-        tags = hashtags(project.game, project.content_type, project.language)
+        tags = hashtags(project.packs or project.game, project.content_type, project.language)
         # With an automatic split layout, a moment filmed with the camera full screen gets face tracking.
         adaptive = project.settings.shorts_layout == "auto"
 

@@ -12,7 +12,7 @@ import threading
 import urllib.request
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
