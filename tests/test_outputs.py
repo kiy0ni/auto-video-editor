@@ -72,9 +72,11 @@ def test_segment_command_with_jump_cuts_and_vertical_layout():
     args = renderer.build_segment_command([(100, 105), (106, 110)], "out.mp4", layout="blur",
                                           captions_file="c.ass", audio_filter="loudnorm=I=-14")
     graph = args[args.index("-filter_complex") + 1]
-    assert args[args.index("-ss") + 1] == "100.000"
+    assert args[args.index("-ss") + 1] == "97.000", "seeks a little before the cut"
+    assert "[0:v:0]fps=30000/1001:start_time=0[vn0]" in graph, "constant frame rate before cutting"
+    assert "[0:a:0]aresample=async=1:first_pts=0[an0]" in graph, "audio on the same clock before cutting"
+    assert "trim=start=3.000:end=8.000" in graph and "atrim=start=9.000:end=13.000" in graph
     assert "concat=n=2:v=1:a=1" in graph
-    assert "fps=30000/1001" in graph
     assert "ass=c.ass" in graph and "loudnorm=I=-14" in graph
     assert args[-1] == "out.mp4"
     assert args[args.index("-t", args.index("-filter_complex")) + 1] == "9.000"

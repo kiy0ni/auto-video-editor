@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 from collections import deque
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from functools import lru_cache
 from typing import Callable, List, Optional, Sequence
 
@@ -61,10 +61,15 @@ class MediaInfo:
     audio_codec: str = ""
     start_timecode: str = ""  # e.g. "01:00:00:00" when the file carries a timecode
     title: str = ""           # title/description metadata, used to recognise the game
+    audio_tracks: List[str] = field(default_factory=list)  # one label per audio stream, in file order
 
     @property
     def aspect(self) -> float:
         return self.width / self.height if self.height else 16 / 9
+
+    @property
+    def track_count(self) -> int:
+        return len(self.audio_tracks) or int(self.has_audio)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -104,7 +109,8 @@ def probe(path: str) -> MediaInfo:
 
     video = next((s for s in streams if s.get("codec_type") == "video"
                   and not s.get("disposition", {}).get("attached_pic")), None)
-    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    audios = [s for s in streams if s.get("codec_type") == "audio"]
+    audio = audios[0] if audios else None
 
     duration = _parse_rate(fmt.get("duration", "0"))
     if duration <= 0:
@@ -130,12 +136,39 @@ def probe(path: str) -> MediaInfo:
         info.audio_channels = int(audio.get("channels") or 0)
         info.sample_rate = int(audio.get("sample_rate") or 0)
         info.audio_codec = audio.get("codec_name", "")
+        info.audio_tracks = [_track_label(i, s) for i, s in enumerate(audios, 1)]
     format_tags = fmt.get("tags", {}) or {}
     if not info.start_timecode:
         info.start_timecode = format_tags.get("timecode", "")
     info.title = " ".join(str(v) for k, v in format_tags.items()
                           if k.lower() in ("title", "comment", "description", "synopsis", "album", "show"))[:400]
     return info
+
+
+# Handler names written by muxers, not by the person who recorded the file.
+_GENERIC_TRACK_NAMES = {"soundhandler", "sound handler", "core media audio", "audio", "isom", "applehandler"}
+
+
+def _track_label(number: int, stream: dict) -> str:
+    """"Track 2 · Mic (mono)": the name OBS and editors give to a track, when there is one."""
+    tags = {k.lower(): str(v).strip() for k, v in (stream.get("tags") or {}).items()}
+    name = tags.get("title") or tags.get("handler_name") or ""
+    if name.lower() in _GENERIC_TRACK_NAMES or name.lower() == f"track{number}":
+        name = ""
+    channels = int(stream.get("channels") or 0)
+    layout = {1: "mono", 2: "stereo"}.get(channels, f"{channels} ch" if channels else "")
+    label = f"Track {number}" + (f" · {name}" if name else "")
+    return label + (f" ({layout})" if layout else "")
+
+
+def audio_input(input_index: int, track: int, count: int) -> str:
+    """Filter graph source for an audio track (1-based) of an input, or all its tracks mixed (0).
+
+    The result is followed by a filter, e.g. ``audio_input(0, 2, 3) + "aresample=48000[a]"``."""
+    if track == 0 and count > 1:
+        pads = "".join(f"[{input_index}:a:{i}]" for i in range(count))
+        return f"{pads}amix=inputs={count}:normalize=0,"
+    return f"[{input_index}:a:{max(1, min(track, count or 1)) - 1}]"
 
 
 def _rotation(stream: dict) -> int:
@@ -217,14 +250,15 @@ def _terminate(proc: subprocess.Popen) -> None:
 
 
 def pcm_reader_command(path: str, sample_rate: int, start: Optional[float] = None,
-                       duration: Optional[float] = None) -> List[str]:
-    """ffmpeg command that writes mono float32 PCM of the first audio stream to stdout."""
+                       duration: Optional[float] = None, track: int = 1, track_count: int = 1) -> List[str]:
+    """ffmpeg command that writes mono float32 PCM of an audio track (0 = all tracks mixed) to stdout."""
     cmd = [ffmpeg_bin(), "-hide_banner", "-nostdin", "-loglevel", "error"]
     if start:
         cmd += ["-ss", f"{start:.3f}"]
     if duration:
         cmd += ["-t", f"{duration:.3f}"]
-    cmd += ["-i", path, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "f32le", "-"]
+    cmd += ["-i", path, "-filter_complex", f"{audio_input(0, track, track_count)}anull[pcm]", "-map", "[pcm]",
+            "-ac", "1", "-ar", str(sample_rate), "-f", "f32le", "-"]
     return cmd
 
 

@@ -186,6 +186,7 @@ class Transcriber:
         self.language = language.strip() or None
         self.log = log
         self.cancel_event = cancel_event or threading.Event()
+        self.audio_track, self.track_count = 1, 1  # track to listen to (1-based, 0 = all mixed)
         self._model = None
 
     # -- model loading --------------------------------------------------------------------
@@ -229,7 +230,7 @@ class Transcriber:
             self._check_cancel()
             window = min(CHUNK_SECONDS + OVERLAP_SECONDS, duration - start)
             is_last = start + window >= duration - 0.5
-            audio = _decode_pcm(path, start, window, self.cancel_event)
+            audio = self._decode(path, start, window)
 
             def chunk_progress(t: float, _start=start) -> None:
                 if on_progress and duration:
@@ -318,7 +319,7 @@ class Transcriber:
         texts: List[str] = []
         for index, start in enumerate(positions):
             self._check_cancel()
-            audio = _decode_pcm(path, start, min(window, duration), self.cancel_event)
+            audio = self._decode(path, start, min(window, duration))
             if audio.size >= SAMPLE_RATE:
                 try:
                     text, language, confidence = self._quick_transcribe(audio)
@@ -349,7 +350,7 @@ class Transcriber:
         """Detect the language on 30 s taken from the first quarter of the recording (intros are
         often silent or music only)."""
         start = max(0.0, min(duration * 0.25, duration - 30.0))
-        audio = _decode_pcm(path, start, min(30.0, duration), self.cancel_event)
+        audio = self._decode(path, start, min(30.0, duration))
         if audio.size < SAMPLE_RATE:
             return None
         try:
@@ -369,6 +370,9 @@ class Transcriber:
         except Exception as exc:  # noqa: BLE001 - fall back to per-chunk detection
             self.log(f"Language detection skipped ({exc}).")
             return None
+
+    def _decode(self, path: str, start: float, duration: float) -> np.ndarray:
+        return _decode_pcm(path, start, duration, self.cancel_event, self.audio_track, self.track_count)
 
     def _check_cancel(self) -> None:
         if self.cancel_event.is_set():
@@ -431,9 +435,9 @@ def _normalize_token(text: str) -> str:
     return "".join(ch for ch in text.lower() if ch.isalnum())
 
 
-def _decode_pcm(path: str, start: float, duration: float,
-                cancel_event: Optional[threading.Event]) -> np.ndarray:
-    proc = popen_binary(pcm_reader_command(path, SAMPLE_RATE, start, duration))
+def _decode_pcm(path: str, start: float, duration: float, cancel_event: Optional[threading.Event],
+                track: int = 1, track_count: int = 1) -> np.ndarray:
+    proc = popen_binary(pcm_reader_command(path, SAMPLE_RATE, start, duration, track, track_count))
     try:
         data, err = proc.communicate()
     finally:

@@ -21,6 +21,19 @@ def _duration(value: str) -> float:
         raise argparse.ArgumentTypeError(str(exc))
 
 
+def _track(value: str) -> int:
+    """Audio track number (1, 2, ...) or "mix" for all the tracks mixed together."""
+    if value.strip().lower() in ("mix", "all", "0"):
+        return 0
+    try:
+        track = int(value)
+    except ValueError:
+        track = -1
+    if track < 1:
+        raise argparse.ArgumentTypeError(f"expected a track number (1, 2, ...) or 'mix', got {value!r}")
+    return track
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="auto-video-editor",
@@ -75,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="remove dead air inside shorts (default: on)")
 
     g = p.add_argument_group("analysis")
+    g.add_argument("--audio-track", type=_track, metavar="N|mix",
+                   help="audio track to analyze in a multi-track recording, e.g. 2 for an OBS mic track "
+                        "(default: 1)")
     g.add_argument("--transcriber", choices=TRANSCRIBERS, help="speech-to-text engine (default: auto)")
     g.add_argument("--model", choices=WHISPER_MODELS, help="Whisper model (default: auto, fits this computer)")
     g.add_argument("--auto-vocabulary", action=argparse.BooleanOptionalAction, default=None,
@@ -94,6 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--no-cache", action="store_true", help="ignore cached audio analysis and transcripts")
 
     g = p.add_argument_group("output")
+    g.add_argument("--output-audio-track", type=_track, metavar="N|mix",
+                   help="audio track heard in the reel and the shorts, or mix for all tracks (default: 1)")
     g.add_argument("--encoder", choices=ENCODERS, help="video encoder (default: auto, uses hardware if available)")
     g.add_argument("--quality", choices=QUALITIES, help="encoding quality (default: high)")
     g.add_argument("--normalize", action=argparse.BooleanOptionalAction, default=None,
@@ -121,7 +139,8 @@ def settings_from_args(args: argparse.Namespace, base: Optional[Settings] = None
         "lufs": "target_lufs", "srt": "export_srt", "edl": "export_edl", "xml": "export_xml",
         "censor": "censor_profanity", "speakers": "speaker_count", "skip_start": "skip_start", "skip_end": "skip_end",
         "hook": "shorts_hook", "publish_kit": "publish_kit", "auto_trim": "auto_trim",
-        "auto_vocabulary": "auto_vocabulary",
+        "auto_vocabulary": "auto_vocabulary", "audio_track": "audio_track",
+        "output_audio_track": "output_audio_track",
     }
     for arg_name, field_name in mapping.items():
         value = getattr(args, arg_name, None)

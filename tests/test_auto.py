@@ -171,8 +171,8 @@ def test_hook_renders_from_a_second_input():
     args = Renderer(MEDIA, "libx264", "draft").build_segment_command([(130, 133), (100, 125), (126, 140)], "o.mp4")
     assert args.count("-i") == 2
     graph = args[args.index("-filter_complex") + 1]
-    assert "[0:v:0]trim=start=0.000:end=3.000" in graph
-    assert "[1:v:0]split=2" in graph and "concat=n=3" in graph
+    assert "[vn0]trim=start=3.000:end=6.000" in graph
+    assert "[vn1]split=2" in graph and "concat=n=3" in graph
 
 
 # -- publishing -------------------------------------------------------------------------------------------
