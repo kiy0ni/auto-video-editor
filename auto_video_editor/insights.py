@@ -46,6 +46,7 @@ class VideoInsights:
     language: str = ""
     sample_text: str = ""
     sample_model: str = ""
+    sample_track: int = 1               # audio track the samples were taken from
 
     def to_dict(self) -> dict:
         return asdict(self)

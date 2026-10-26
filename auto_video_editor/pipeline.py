@@ -191,6 +191,15 @@ class Pipeline:
                  f"{info.width}x{info.height} @ {info.fps:.2f} fps | audio: {'yes' if info.has_audio else 'no'}")
         if not info.has_audio:
             self.log("WARNING: no audio track. Moments cannot be detected reliably without sound.")
+        for name in ("audio_track", "output_audio_track"):
+            if info.has_audio and getattr(s, name) > info.track_count:
+                self.log(f"WARNING: this file has no audio track {getattr(s, name)} "
+                         f"({info.track_count} track(s)); using track 1.")
+        if info.track_count > 1:
+            self.log(f"Audio tracks: {', '.join(info.audio_tracks)}.")
+            self.log(f"Listening to {self._track_name(self._track(info, 'audio_track'))}, rendering "
+                     f"{self._track_name(self._track(info, 'output_audio_track'))} "
+                     "(change it in Detection > Audio tracks, or with --audio-track / --output-audio-track).")
 
         insights = self._load_insights(info)
         env = self._load_envelope(info)
@@ -213,6 +222,7 @@ class Pipeline:
                 auto.append(["Speech model", s.whisper_model])
             transcriber = Transcriber(backend, s.whisper_model, s.language, self.log, r.cancel_event,
                                       beam_size=s.beam_size, profanity=s.profanity_prompt)
+            transcriber.audio_track, transcriber.track_count = self._track(info, "audio_track"), info.track_count
             sample = ""
             if not s.language or (s.auto_vocabulary and not any(p.is_game for p in chosen + detected)):
                 language, sample = self._preview(info, transcriber, insights)
@@ -383,7 +393,7 @@ class Pipeline:
         self.log("Video scan: " + ", ".join(parts) + ".")
 
     def _preview(self, info: MediaInfo, transcriber: Transcriber, insights: VideoInsights) -> Tuple[Optional[str], str]:
-        if self.settings.use_cache and insights.sample_model:
+        if self.settings.use_cache and insights.sample_model and insights.sample_track == transcriber.audio_track:
             return insights.language or None, insights.sample_text
         self.log("Listening to a few samples (language, topic)...")
         language, text = transcriber.preview(info.path, info.duration,
@@ -391,6 +401,7 @@ class Pipeline:
         if language:
             self.log(f"Detected language: {language}.")
         insights.language, insights.sample_text, insights.sample_model = language or "", text, transcriber.model_name
+        insights.sample_track = transcriber.audio_track
         save_insights(info.path, insights)
         return language, text
 
@@ -448,9 +459,23 @@ class Pipeline:
     def _cache_file(self, kind: str, name: str) -> Path:
         return cache_dir() / kind / name
 
+    def _track(self, info: MediaInfo, name: str) -> int:
+        """Audio track chosen in the settings (1-based, 0 = all mixed), or track 1 if the file lacks it."""
+        track = getattr(self.settings, name)
+        return 1 if track > info.track_count else track
+
+    @staticmethod
+    def _track_name(track: int) -> str:
+        return "all audio tracks mixed" if track == 0 else f"audio track {track}"
+
+    def _envelope_path(self, info: MediaInfo) -> Path:
+        track = self._track(info, "audio_track")
+        suffix = "" if track == 1 else f"-t{track}"
+        return self._cache_file("audio", f"{media_fingerprint(info.path)}-v1{suffix}.npz")
+
     def _load_envelope(self, info: MediaInfo) -> AudioEnvelope:
         s, r = self.settings, self.reporter
-        path = self._cache_file("audio", f"{media_fingerprint(info.path)}-v1.npz")
+        path = self._envelope_path(info)
         if s.use_cache and path.exists():
             try:
                 self._envelope = AudioEnvelope.load(path)
@@ -459,7 +484,8 @@ class Pipeline:
             except (OSError, ValueError, KeyError):
                 pass
         self.log("Analyzing audio levels...")
-        env = analyze_audio(info, r.stage("audio", "Analyzing audio"), r.cancel_event)
+        env = analyze_audio(info, r.stage("audio", "Analyzing audio"), r.cancel_event,
+                            track=self._track(info, "audio_track"))
         try:
             env.save(path)
         except OSError:
@@ -472,8 +498,10 @@ class Pipeline:
         r = self.reporter
         language = s.language.strip().lower() or "auto"
         context = hashlib.sha1(json.dumps([sorted(s.vocabulary), s.profanity_prompt]).encode("utf-8")).hexdigest()[:8]
+        track = transcriber.audio_track
         path = self._cache_file("transcripts", f"{media_fingerprint(info.path)}-{backend}-{s.whisper_model}-"
                                                f"{language}{'' if s.beam_size == 5 else f'-b{s.beam_size}'}-"
+                                               f"{'' if track == 1 else f't{track}-'}"
                                                f"{context}-{TRANSCRIPT_CACHE_VERSION}.json")
         if s.use_cache and path.exists():
             cached = load_cached(path)
@@ -537,7 +565,7 @@ class Pipeline:
         encoder = pick_encoder(s.encoder)
         self.log(f"Encoder: {encoder} ({s.quality} quality)")
         renderer = Renderer(info, encoder, s.quality, r.cancel_event, audio_bitrate=s.audio_bitrate,
-                            blur=s.blur_strength)
+                            blur=s.blur_strength, audio_track=self._track(info, "output_audio_track"))
 
         highlight_time = sum(m.edited_duration(s.jump_cuts) for m in highlight)
         shorts_time = sum(m.edited_duration(s.shorts_jump_cuts) for m in shorts)
@@ -576,7 +604,7 @@ class Pipeline:
 
     def _cached_envelope(self, info: MediaInfo) -> Optional[AudioEnvelope]:
         try:
-            path = self._cache_file("audio", f"{media_fingerprint(info.path)}-v1.npz")
+            path = self._envelope_path(info)
             if path.exists():
                 self._envelope = AudioEnvelope.load(path)
         except (OSError, ValueError, KeyError):

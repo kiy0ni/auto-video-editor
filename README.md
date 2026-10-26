@@ -73,7 +73,8 @@ really starts and ends. Every automatic choice is shown and can be overridden.
   and caption lines never mix two speakers.
 
 **Editing quality**
-- Frame-accurate cuts, source frame rate preserved, 20 ms audio fades on every cut (no clicks or pops).
+- Frame-accurate cuts, source frame rate preserved, audio kept in sync even on variable frame rate
+  recordings, 20 ms audio fades on every cut (no clicks or pops).
 - Optional **jump cuts**: dead air is removed inside moments, while loud action without speech is kept.
 - Optional fade transitions, lead-in and tail padding.
 - **Two-pass loudness normalization** (EBU R128, -14 LUFS by default) for consistent volume.
@@ -156,7 +157,8 @@ The app has two modes, switchable at the top of the sidebar.
 - **Shorts & captions**: count and length, visual layout picker, facecam area drawn on a frame of your video,
   background blur, caption style, font, size, position, uppercase, words per line, highlight color and
   color by speaker.
-- **Detection**: speech engine, model, language, beam size, vocabulary packs (picker and automatic
+- **Detection**: audio tracks (which track is analyzed and which one is heard in the videos, for multi-track
+  recordings), speech engine, model, language, beam size, vocabulary packs (picker and automatic
   recognition), vocabulary hints, swear words (transcribe /
   censor / extra words), speaker detection and count, the weight of each scoring signal (loudness,
   spikes, speech rate, hype phrases, exclamations) and the hype phrase list.
@@ -186,6 +188,9 @@ python main.py --project stream_edit/project.json
 
 # French Minecraft stream with a co-streamer: vocabulary hints, censored swear words, skip the intro
 python main.py stream.mp4 --language fr --vocabulary "Minecraft,creeper,mob,cave" --censor --speakers 2 --skip-start 3m
+
+# OBS multi-track recording: analyze the mic (track 2), keep the full mix (track 1) in the videos
+python main.py stream.mkv --audio-track 2 --output-audio-track 1
 
 # Vocabulary packs (python main.py --list-packs shows all of them)
 python main.py stream.mp4 --packs minecraft,twitch-fr
@@ -274,6 +279,11 @@ Never more than half of the source. Use `--target` (or *Exact length*) to set it
 - **Moments feel too short/long**: tune *Shortest/Longest moment* and the lead-in/tail padding.
 - **Your own catchphrases**: add them in *Analysis > Hype phrases* (or `--keywords`).
 - **Hardware encoder errors**: choose `libx264` in *Output > Video encoder*.
+- **Several audio tracks** (OBS with the mic on its own track): only track 1 is used by default. Pick the
+  track with your voice in *Detection > Audio tracks* (or `--audio-track 2`) for better moments and captions,
+  and choose what the videos sound like there too: one track or *All tracks mixed* (`--output-audio-track mix`).
+- **Audio out of sync in the outputs**: fixed in 2.2 for variable frame rate recordings (OBS, phones) and
+  files whose audio starts after the video (Twitch VODs, MKV/TS). Update and render again.
 - **`smart` layout falls back to a centered crop**: install OpenCV 4 (`pip install "opencv-python-headless<5"`).
   Faces are only detected when clearly visible; for streams with a facecam overlay, `split` usually looks better.
 - Caches live in `~/Library/Caches/auto-video-editor` (macOS), `%LOCALAPPDATA%\auto-video-editor` (Windows)

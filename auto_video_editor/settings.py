@@ -123,6 +123,7 @@ class Settings:
     caption_speaker_colors: bool = True  # one text color per detected speaker
 
     # Analysis ----------------------------------------------------------------------
+    audio_track: int = 1            # audio track listened to (multi-track OBS recordings); 0 = all tracks mixed
     transcriber: str = "auto"
     whisper_model: str = "auto"
     language: str = ""  # empty = auto-detect
@@ -145,6 +146,7 @@ class Settings:
     weight_exclamations: float = 1.0
 
     # Audio / encoding --------------------------------------------------------------
+    output_audio_track: int = 1     # audio track heard in the reel and the shorts; 0 = all tracks mixed
     normalize_audio: bool = True
     target_lufs: float = -14.0
     audio_bitrate: int = 192
@@ -273,6 +275,8 @@ class Settings:
         check_range("skip_start", 0, 7200)
         check_range("skip_end", 0, 7200)
         check_range("speaker_count", 0, 10)
+        check_range("audio_track", 0, 32)
+        check_range("output_audio_track", 0, 32)
         if self.silence_threshold != 0:
             check_range("silence_threshold", -80, -10)
         check_range("fade_duration", 0.05, 2)

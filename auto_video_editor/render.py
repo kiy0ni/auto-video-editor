@@ -9,12 +9,13 @@ import threading
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
-from .ffmpeg import MediaInfo, audio_codec_args, run_ffmpeg, video_codec_args
+from .ffmpeg import MediaInfo, audio_codec_args, audio_input, run_ffmpeg, video_codec_args
 from .timeline import Range, total_duration
 
 VERTICAL_W, VERTICAL_H = 1080, 1920
 SPLIT_TOP_H = 640
 MICRO_FADE = 0.02  # seconds; removes clicks at every audio cut
+SEEK_PREROLL = 3.0  # seconds decoded before each cut, then trimmed away
 
 
 def fps_expression(fps: float) -> str:
@@ -114,13 +115,14 @@ def loudnorm_apply_filter(measured: Optional[dict], target_lufs: float) -> str:
 class Renderer:
     def __init__(self, info: MediaInfo, encoder: str, quality: str,
                  cancel_event: Optional[threading.Event] = None, audio_bitrate: int = 192,
-                 blur: int = 10) -> None:
+                 blur: int = 10, audio_track: int = 1) -> None:
         self.info = info
         self.encoder = encoder
         self.quality = quality
         self.cancel_event = cancel_event
         self.audio_args = audio_codec_args(audio_bitrate)
         self.blur = blur
+        self.audio_track = audio_track  # audio track of the source heard in the output (1-based, 0 = all mixed)
 
     def build_segment_command(
         self,
@@ -155,18 +157,27 @@ class Renderer:
         asrc: List[str] = []
         local: List[Range] = []
         for index, run in enumerate(runs):
-            origin, finish = run[0][0], run[-1][1]
+            # Seek a little before the cut: fast seeking can land after the target (MPEG-TS) and the
+            # frame shown at the cut point may have been decoded before it (variable frame rate).
+            origin, finish = max(0.0, run[0][0] - SEEK_PREROLL), run[-1][1]
             args += ["-ss", f"{origin:.3f}", "-t", f"{finish - origin + 0.1:.3f}", "-i", info.path]
             local += [(a - origin, b - origin) for a, b in run]
+            # Put both streams on one clock starting at the seek point before cutting: constant frame
+            # rate video and gap-free audio. Variable frame rate recordings (OBS, phones) and audio
+            # that starts later than the video (Twitch VODs, MKV/TS) drift out of sync otherwise.
+            graph.append(f"[{index}:v:0]fps={fps_expression(info.fps)}:start_time=0[vn{index}]")
+            if info.has_audio:
+                graph.append(f"{audio_input(index, self.audio_track, info.track_count)}"
+                             f"aresample=async=1:first_pts=0[an{index}]")
             if len(run) == 1:
-                vsrc.append(f"[{index}:v:0]")
-                asrc.append(f"[{index}:a:0]")
+                vsrc.append(f"[vn{index}]")
+                asrc.append(f"[an{index}]")
                 continue
             vlabels = [f"[vs{index}_{j}]" for j in range(len(run))]
             alabels = [f"[as{index}_{j}]" for j in range(len(run))]
-            graph.append(f"[{index}:v:0]split={len(run)}{''.join(vlabels)}")
+            graph.append(f"[vn{index}]split={len(run)}{''.join(vlabels)}")
             if info.has_audio:
-                graph.append(f"[{index}:a:0]asplit={len(run)}{''.join(alabels)}")
+                graph.append(f"[an{index}]asplit={len(run)}{''.join(alabels)}")
             vsrc += vlabels
             asrc += alabels
         silent_input = len(runs)
@@ -251,8 +262,10 @@ class Renderer:
         if not self.info.has_audio or not ranges:
             return None
         origin, finish = min(a for a, _ in ranges), max(b for _, b in ranges)
+        source = audio_input(0, self.audio_track, self.info.track_count)
         args = ["-ss", f"{origin:.3f}", "-t", f"{finish - origin:.3f}", "-i", self.info.path,
-                "-map", "0:a:0", "-vn", "-af", loudnorm_measure_filter(target_lufs), "-f", "null", "-"]
+                "-filter_complex", f"{source}{loudnorm_measure_filter(target_lufs)}[m]", "-map", "[m]",
+                "-f", "null", "-"]
         stderr = run_ffmpeg(args, cancel_event=self.cancel_event, loglevel="info")
         return parse_loudnorm(stderr)
 

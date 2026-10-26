@@ -62,6 +62,7 @@ WHITE = ("#ffffff", "#ffffff")
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".flv", ".webm", ".wmv", ".ts", ".m4v", ".mts"}
 VIDEO_TYPES = [("Video files", " ".join(f"*{e}" for e in sorted(VIDEO_EXTENSIONS))), ("All files", "*.*")]
+TRACK_MIX_LABEL = "All tracks mixed"
 
 PAGES = [
     ("home", "Create", "Drop a recording, pick what you want, get your edit.", "film"),
@@ -665,14 +666,42 @@ class App:
 
     def _option(self, parent, name: str, options: Sequence[Tuple[str, str]], width: int = 260) -> ctk.CTkOptionMenu:
         value_var, display, to_value = self._choice_vars(name, options)
-        widget = ctk.CTkOptionMenu(
-            parent, values=[label for label, _ in options], variable=display,
-            command=lambda label: value_var.set(to_value[label]), width=width, height=36, corner_radius=10,
+        widget = self._option_menu(parent, [label for label, _ in options], display,
+                                   lambda label: value_var.set(to_value[label]), width)
+        widget.pack(side="right")
+        return widget
+
+    def _option_menu(self, parent, values: Sequence[str], display: tk.StringVar, command: Callable,
+                     width: int) -> ctk.CTkOptionMenu:
+        return ctk.CTkOptionMenu(
+            parent, values=list(values), variable=display, command=command, width=width, height=36, corner_radius=10,
             fg_color=SUBTLE, button_color=SUBTLE, button_hover_color=BORDER, text_color=TEXT, font=self.f.small_bold,
             dropdown_fg_color=CARD, dropdown_hover_color=SUBTLE, dropdown_text_color=TEXT,
             dropdown_font=self.f.small, dynamic_resizing=False)
-        widget.pack(side="right")
-        return widget
+
+    def _track_option(self, parent, name: str) -> None:
+        """Menu of the audio tracks; it lists the tracks of the video (with their names) once it is read."""
+        value_var, display = self._var(name, tk.StringVar), tk.StringVar()
+        menu = self._option_menu(parent, [], display, lambda label: value_var.set(self._track_value(label)), 290)
+        menu.pack(side="right")
+        self.track_menus[name] = (menu, value_var, display)
+        value_var.trace_add("write", lambda *_: self._refresh_track_menus())
+
+    def _track_choices(self) -> List[Tuple[str, str]]:
+        labels = list(self.media.audio_tracks) if self.media and self.media.audio_tracks else \
+            [f"Track {i}" for i in range(1, 7)]
+        return [(label, str(i)) for i, label in enumerate(labels, 1)] + [(TRACK_MIX_LABEL, "0")]
+
+    def _track_value(self, label: str) -> str:
+        return dict(self._track_choices()).get(label, "1")
+
+    def _refresh_track_menus(self) -> None:
+        choices = self._track_choices()
+        to_label = {value: label for label, value in choices}
+        for menu, value_var, display in getattr(self, "track_menus", {}).values():
+            menu.configure(values=[label for label, _ in choices])
+            value = str(value_var.get() or "1")
+            display.set(to_label.get(value, f"Track {value} (not in this video)"))
 
     def _entry(self, parent, var: tk.StringVar, width: int = 220) -> ctk.CTkEntry:
         return ctk.CTkEntry(parent, textvariable=var, width=width, height=36, corner_radius=10, border_width=1,
@@ -1052,6 +1081,16 @@ class App:
         self._end(captions)
 
     def _build_detection_page(self, page) -> None:
+        tracks = self._section(page, "Audio tracks",
+                               "For recordings with several tracks, like OBS with your mic on its own track.", "mic")
+        self.track_menus = {}
+        self._track_option(self._row(tracks, "Track to analyze",
+                                     "Pick the one with your voice: moments, speech and captions come from it."),
+                           "audio_track")
+        self._track_option(self._row(tracks, "Audio in the videos", "What the reel and the shorts sound like."),
+                           "output_audio_track")
+        self._end(tracks)
+
         speech = self._section(page, "Speech recognition",
                                "Used for sentence-aware cuts, hype phrases and captions.", "wave")
         self._option(self._row(speech, "Engine", "faster-whisper is ~4x faster than OpenAI Whisper."),
@@ -1566,8 +1605,10 @@ class App:
         size = _file_size(Path(path))
         if size:
             chips.append(size)
-        chips.append("audio" if info.has_audio else "no audio")
+        chips.append(f"{info.track_count} audio tracks" if info.track_count > 1 else
+                     "audio" if info.has_audio else "no audio")
         self._set_chips(chips)
+        self._refresh_track_menus()
         self._update_estimates()
         self._set_status("Ready", "Create my edit does everything, Review first lets you choose the moments.",
                          GREEN)

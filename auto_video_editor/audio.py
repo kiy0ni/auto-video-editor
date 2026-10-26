@@ -93,12 +93,13 @@ def analyze_audio(
     info: MediaInfo,
     on_progress: Optional[Callable[[float], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    track: int = 1,
 ) -> AudioEnvelope:
-    """Decode the audio once (16 kHz mono) and compute the loudness envelope."""
+    """Decode an audio track once (16 kHz mono, 0 = all tracks mixed) and compute the loudness envelope."""
     if not info.has_audio:
         return silent_envelope(info.duration)
 
-    proc = popen_binary(pcm_reader_command(info.path, SAMPLE_RATE))
+    proc = popen_binary(pcm_reader_command(info.path, SAMPLE_RATE, track=track, track_count=info.track_count))
     stderr_chunks: list = []
     reader = threading.Thread(target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True)
     reader.start()
